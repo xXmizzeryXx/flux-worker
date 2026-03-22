@@ -57,6 +57,14 @@ async function handleFetch(request, workerUrl) {
   }
 
   reqHeaders.set('Host', new URL(targetUrl).host);
+  reqHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+  reqHeaders.set('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8');
+  reqHeaders.set('Accept-Language', 'en-US,en;q=0.9');
+  reqHeaders.set('Accept-Encoding', 'gzip, deflate, br');
+  reqHeaders.set('Sec-Fetch-Dest', 'document');
+  reqHeaders.set('Sec-Fetch-Mode', 'navigate');
+  reqHeaders.set('Sec-Fetch-Site', 'none');
+  reqHeaders.set('Upgrade-Insecure-Requests', '1');
 
   let body = null;
   if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -215,8 +223,10 @@ function rewriteUrl(url, base, workerOrigin) {
     return url;
   }
   if (url.includes('/fetch/')) return url;
+  if (url.startsWith(workerOrigin)) return url;
   try {
     const abs = new URL(url, base).href;
+    if (!abs.startsWith('http://') && !abs.startsWith('https://')) return url;
     return `${workerOrigin}/fetch/${encodeURIComponent(abs)}`;
   } catch (e) {
     return url;
