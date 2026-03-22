@@ -95,8 +95,29 @@ async function handleFetch(request, workerUrl) {
   Object.entries(corsHeaders()).forEach(([k, v]) => resHeaders.set(k, v));
 
   const contentType = targetRes.headers.get('content-type') || '';
+  const url2 = new URL(targetUrl);
+  const ext = url2.pathname.split('.').pop().toLowerCase();
 
-  if (contentType.includes('text/html')) {
+  const mimeByExt = {
+    js: 'application/javascript', mjs: 'application/javascript',
+    cjs: 'application/javascript', css: 'text/css',
+    json: 'application/json', html: 'text/html', htm: 'text/html',
+    svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg',
+    jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+    woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf',
+    ico: 'image/x-icon', mp4: 'video/mp4', webm: 'video/webm',
+    mp3: 'audio/mpeg', ogg: 'audio/ogg', wav: 'audio/wav',
+    wasm: 'application/wasm', xml: 'application/xml', txt: 'text/plain',
+  };
+
+  const detectedMime = mimeByExt[ext];
+  if (detectedMime && !contentType.includes(detectedMime)) {
+    resHeaders.set('content-type', detectedMime);
+  }
+
+  const finalContentType = resHeaders.get('content-type') || contentType;
+
+  if (finalContentType.includes('text/html')) {
     let html = await targetRes.text();
     const base = new URL(targetUrl);
     html = rewriteHtml(html, base, workerUrl.origin);
@@ -106,6 +127,14 @@ async function handleFetch(request, workerUrl) {
       status: targetRes.status,
       headers: resHeaders,
     });
+  }
+
+  if (finalContentType.includes('javascript') || ext === 'js' || ext === 'mjs') {
+    let js = await targetRes.text();
+    js = rewriteJs(js, new URL(targetUrl), workerUrl.origin);
+    resHeaders.set('content-type', 'application/javascript');
+    resHeaders.delete('content-encoding');
+    return new Response(js, { status: targetRes.status, headers: resHeaders });
   }
 
   return new Response(targetRes.body, {
@@ -165,6 +194,18 @@ function rewriteHtml(html, base, workerOrigin) {
   }
 
   return html;
+}
+
+function rewriteJs(js, base, workerOrigin) {
+  js = js.replace(/(?:import|from)\s+["']([^"']+)["']/g, (match, url) => {
+    const rewritten = rewriteUrl(url, base, workerOrigin);
+    return match.replace(url, rewritten);
+  });
+  js = js.replace(/(?:fetch|import)\s*\(\s*["']([^"']+)["']/g, (match, url) => {
+    const rewritten = rewriteUrl(url, base, workerOrigin);
+    return match.replace(url, rewritten);
+  });
+  return js;
 }
 
 function rewriteUrl(url, base, workerOrigin) {
