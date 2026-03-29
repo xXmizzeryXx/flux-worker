@@ -81,7 +81,6 @@ function rewriteHtml(html, base, workerOrigin) {
     const realOrigin    = base.origin;
     const realHost      = base.host;
     const realHref      = base.href;
-    const workerFetch   = workerOrigin + FLUX_PREFIX;
 
     const injection = `<script>
 (function() {
@@ -162,6 +161,15 @@ function rewriteHtml(html, base, workerOrigin) {
     window.WebSocket.CLOSING    = _wsOriginal.CLOSING;
     window.WebSocket.CLOSED     = _wsOriginal.CLOSED;
 
+    const _Worker = window.Worker;
+    window.Worker = function(url, opts) {
+        if (typeof url === 'string' || url instanceof URL) {
+            url = __rewrite(String(url));
+        }
+        return new _Worker(url, opts);
+    };
+    window.Worker.prototype = _Worker.prototype;
+
     const _open = window.open;
     window.open = function(url, ...args) {
         return _open.call(this, __rewrite(url), ...args);
@@ -170,6 +178,11 @@ function rewriteHtml(html, base, workerOrigin) {
     Object.defineProperty(document, 'cookie', {
         get() { return ''; },
         set() {},
+    });
+
+    Object.defineProperty(navigator, 'serviceWorker', {
+        get() { return undefined; },
+        configurable: true,
     });
 
     const _assign   = location.assign.bind(location);
@@ -247,6 +260,12 @@ function rewriteHtml(html, base, workerOrigin) {
         };
     }
 
+    const __origImport = (u) => import(u);
+    window.__fluxDynamicImport = function(u) {
+        try { u = __rewrite(String(u)); } catch {}
+        return __origImport(u);
+    };
+
     const observer = new MutationObserver(mutations => {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
@@ -287,20 +306,27 @@ function rewriteHtml(html, base, workerOrigin) {
 }
 
 function rewriteJs(js, base, workerOrigin) {
+    const header = `(function(){
+const __fluxOrigin=${JSON.stringify(workerOrigin)};
+const __fluxPrefix=${JSON.stringify(FLUX_PREFIX)};
+const __fluxBase=${JSON.stringify(base.href)};
+function __fluxEncode(u){try{return btoa(unescape(encodeURIComponent(u))).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/,'');}catch{return encodeURIComponent(u);}}
+function __fluxRewrite(u){if(!u)return u;const s=String(u);if(s.startsWith('data:')||s.startsWith('blob:')||s.startsWith('javascript:')||s.startsWith('#'))return s;if(s.includes(__fluxPrefix))return s;if(s.startsWith(__fluxOrigin))return s;try{const a=new URL(s,__fluxBase).href;if(!a.startsWith('http://')&&!a.startsWith('https://'))return s;return __fluxOrigin+__fluxPrefix+__fluxEncode(a);}catch{return s;}}
+window.__fluxDynamicImport=window.__fluxDynamicImport||function(u){return import(__fluxRewrite(String(u)));};
+})();\n`;
+
     js = js.replace(/(['"`])((?:https?:)?\/\/[^'"`\s]+)\1/g, (match, quote, url) => {
         const rewritten = rewriteUrl(url, base, workerOrigin);
         return quote + rewritten + quote;
     });
 
-    js = js.replace(/(?:^|[^.\w])import\s*\(\s*(['"`])([^'"`]+)\1/gm, (match, quote, url) => {
-        return match.replace(url, rewriteUrl(url, base, workerOrigin));
-    });
+    js = js.replace(/\bimport\s*\(\s*/g, '__fluxDynamicImport(');
 
     js = js.replace(/(?:^|[^.\w])import\s+(?:[\w*{}\s,]+\s+from\s+)?(['"`])([^'"`]+)\1/gm, (match, quote, url) => {
         return match.replace(url, rewriteUrl(url, base, workerOrigin));
     });
 
-    return js;
+    return header + js;
 }
 
 function rewriteCss(css, base, workerOrigin) {
@@ -422,6 +448,9 @@ async function handleFetch(request, workerUrl) {
     for (const [k, v] of Object.entries(corsHeaders())) {
         resHeaders.set(k, v);
     }
+
+    resHeaders.set('Cross-Origin-Opener-Policy',   'same-origin');
+    resHeaders.set('Cross-Origin-Embedder-Policy',  'require-corp');
 
     const contentType = resHeaders.get('content-type') || targetRes.headers.get('content-type') || '';
     const ext         = parsedTarget.pathname.split('.').pop().toLowerCase();
