@@ -128,6 +128,55 @@ function __unwrap(u){
     try{return __dec(s.slice(idx+__fp.length));}catch(e){return s;}
 }
 
+try{Object.defineProperty(navigator,'webdriver',{get:function(){return undefined;},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'platform',{get:function(){return 'Win32';},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'vendor',{get:function(){return 'Google Inc.';},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'appName',{get:function(){return 'Netscape';},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'appVersion',{get:function(){return '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'userAgent',{get:function(){return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'languages',{get:function(){return ['en-US','en'];},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'hardwareConcurrency',{get:function(){return 8;},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'deviceMemory',{get:function(){return 8;},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'maxTouchPoints',{get:function(){return 0;},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'cookieEnabled',{get:function(){return true;},configurable:true});}catch(e){}
+try{Object.defineProperty(navigator,'onLine',{get:function(){return true;},configurable:true});}catch(e){}
+try{
+    var __plFake=[{filename:'internal/default/internal_delegate_composite.so'},{filename:'internal/default/libpepflashplayer.so'}];
+    Object.defineProperty(navigator,'plugins',{get:function(){return __plFake;},configurable:true});
+    Object.defineProperty(navigator,'mimeTypes',{get:function(){return [];},configurable:true});
+}catch(e){}
+try{
+    if(!window.chrome){
+        Object.defineProperty(window,'chrome',{value:{runtime:{},loadTimes:function(){},csi:function(){},app:{}},writable:false,configurable:true});
+    }
+}catch(e){}
+try{
+    var __permQuery=navigator.permissions&&navigator.permissions.query.bind(navigator.permissions);
+    if(__permQuery){
+        navigator.permissions.query=function(desc){
+            if(desc&&desc.name==='notifications'){return Promise.resolve({state:Notification.permission==='default'?'prompt':Notification.permission});}
+            return __permQuery(desc);
+        };
+    }
+}catch(e){}
+try{Object.defineProperty(window,'outerWidth',{get:function(){return window.innerWidth;},configurable:true});}catch(e){}
+try{Object.defineProperty(window,'outerHeight',{get:function(){return window.innerHeight+80;},configurable:true});}catch(e){}
+try{Object.defineProperty(screen,'width',{get:function(){return 1920;},configurable:true});}catch(e){}
+try{Object.defineProperty(screen,'height',{get:function(){return 1080;},configurable:true});}catch(e){}
+try{Object.defineProperty(screen,'availWidth',{get:function(){return 1920;},configurable:true});}catch(e){}
+try{Object.defineProperty(screen,'availHeight',{get:function(){return 1040;},configurable:true});}catch(e){}
+try{Object.defineProperty(screen,'colorDepth',{get:function(){return 24;},configurable:true});}catch(e){}
+try{Object.defineProperty(screen,'pixelDepth',{get:function(){return 24;},configurable:true});}catch(e){}
+try{if(window.name&&window.name.includes(__fo))window.name='';}catch(e){}
+try{
+    var __origToString=Function.prototype.toString;
+    var __nativeRe=/\{\s*\[native code\]\s*\}/;
+    Function.prototype.toString=function(){
+        var s=__origToString.call(this);
+        return s;
+    };
+}catch(e){}
+
 var _xhrOpen=XMLHttpRequest.prototype.open;
 XMLHttpRequest.prototype.open=function(m,u){
     var args=Array.prototype.slice.call(arguments);
