@@ -318,7 +318,7 @@ try{
                 var reader=new FileReaderSync();
                 var text=reader.readAsText(obj);
                 var rewritten=text.replace(/url\(["']?([^"')]+)["']?\)/gi,function(m,u){return 'url("'+__rw(u.trim())+'")';});
-                rewritten=rewritten.replace(/(?:import|from)\s+(["'])([^"']+)\1/g,function(m,q,u){return m.replace(u,__rw(u));});
+                rewritten=rewritten.replace(/(?:import|from)\s+(["'])([^"']+)(["'])/g,function(m,q1,u,q2){if(q1!==q2)return m;return m.replace(u,__rw(u));});
                 return _createObjectURL(new Blob([rewritten],{type:obj.type}));
             }catch(e){
                 // FileReaderSync not available in main thread; fall through
