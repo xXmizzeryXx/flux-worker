@@ -465,12 +465,6 @@ function rewriteCss(css, base, workerOrigin) {
     return rewriteCssText(css, base, workerOrigin);
 }
 
-function rewriteCssText(css, base, workerOrigin) {
-    return css.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, url) => {
-        return `url("${rewriteUrl(url.trim(), base, workerOrigin)}")`;
-    });
-}
-
 function rewriteCookieHeader(cookieHeader, targetHost) {
     if (!cookieHeader) return cookieHeader;
     return cookieHeader
