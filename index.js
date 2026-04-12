@@ -2,11 +2,11 @@ const FLUX_PREFIX = '/fetch/';
 
 function corsHeaders() {
     return {
-        'Access-Control-Allow-Origin':   '*',
-        'Access-Control-Allow-Methods':  'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD',
-        'Access-Control-Allow-Headers':  '*',
+        'Access-Control-Allow-Origin':      '*',
+        'Access-Control-Allow-Methods':     'GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD',
+        'Access-Control-Allow-Headers':     '*',
         'Access-Control-Allow-Credentials': 'true',
-        'Access-Control-Expose-Headers': '*',
+        'Access-Control-Expose-Headers':    '*',
     };
 }
 
@@ -20,7 +20,11 @@ function decodeUrl(encoded) {
     try {
         return decodeURIComponent(escape(atob(base64)));
     } catch {
-        try { return decodeURIComponent(encoded); } catch { return encoded; }
+        try {
+            return decodeURIComponent(encoded);
+        } catch {
+            return null;
+        }
     }
 }
 
@@ -50,51 +54,92 @@ function rewriteUrl(url, base, workerOrigin) {
     }
 }
 
+function rewriteSrcset(val, base, workerOrigin) {
+    return val.split(',').map(part => {
+        const trimmed = part.trim();
+        const spaceIdx = trimmed.lastIndexOf(' ');
+        if (spaceIdx !== -1) {
+            const u = trimmed.substring(0, spaceIdx).trim();
+            const d = trimmed.substring(spaceIdx);
+            return rewriteUrl(u, base, workerOrigin) + d;
+        }
+        return rewriteUrl(trimmed, base, workerOrigin);
+    }).join(', ');
+}
+
+function rewriteCssText(css, base, workerOrigin) {
+    return css.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, u) => {
+        return `url("${rewriteUrl(u.trim(), base, workerOrigin)}")`;
+    });
+}
+
 function rewriteHtml(html, base, workerOrigin) {
+    // Strip base tags
     html = html.replace(/<base[^>]*>/gi, '');
 
+    // Strip meta refresh
+    html = html.replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, '');
+
+    // Strip CSP meta tags (they block our injected script)
+    html = html.replace(/<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]*>/gi, '');
+
+    // Strip integrity and crossorigin attributes (SRI breaks rewritten content)
+    html = html.replace(/\s+integrity=["'][^"']*["']/gi, '');
+    html = html.replace(/\s+crossorigin=["'][^"']*["']/gi, '');
+
+    // Rewrite standard URL attributes
     html = html.replace(
-        /(href|src|action|data-src|data-href|poster|srcset|data-url|content)=(["'])([^"']+)\2/gi,
+        /(href|src|action|data-src|data-href|poster|data-url)=(["'])([^"']*)\2/gi,
         (match, attr, quote, val) => {
-            const lattr = attr.toLowerCase();
-
-            if (lattr === 'content') {
-                if (/(url=)(https?:\/\/[^\s"']+)/i.test(val)) {
-                    return match;
-                }
-                return match;
-            }
-
-            if (lattr === 'srcset') {
-                const rewritten = val.split(',').map(part => {
-                    const trimmed = part.trim();
-                    const spaceIdx = trimmed.lastIndexOf(' ');
-                    if (spaceIdx !== -1) {
-                        const u = trimmed.substring(0, spaceIdx).trim();
-                        const d = trimmed.substring(spaceIdx);
-                        return rewriteUrl(u, base, workerOrigin) + d;
-                    }
-                    return rewriteUrl(trimmed, base, workerOrigin);
-                }).join(', ');
-                return `${attr}=${quote}${rewritten}${quote}`;
-            }
-
             return `${attr}=${quote}${rewriteUrl(val, base, workerOrigin)}${quote}`;
         }
     );
 
-    html = html.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, val) => {
-        return `url("${rewriteUrl(val.trim(), base, workerOrigin)}")`;
-    });
+    // Rewrite srcset attributes
+    html = html.replace(
+        /srcset=(["'])([^"']*)\1/gi,
+        (match, quote, val) => {
+            return `srcset=${quote}${rewriteSrcset(val, base, workerOrigin)}${quote}`;
+        }
+    );
 
-    html = html.replace(/(<[^>]+\bstyle=["'])([^"']+)(["'])/gi, (match, open, style, close) => {
-        const rewrittenStyle = style.replace(/url\(["']?([^"')]+)["']?\)/gi, (m, u) => {
-            return `url("${rewriteUrl(u.trim(), base, workerOrigin)}")`;
-        });
-        return open + rewrittenStyle + close;
-    });
+    // Rewrite preload / modulepreload link hrefs
+    html = html.replace(
+        /(<link[^>]+rel=["']?(?:preload|modulepreload|stylesheet|icon|shortcut icon|apple-touch-icon)[^>]*?\s)href=(["'])([^"']+)\2/gi,
+        (match, prefix, quote, val) => {
+            return `${prefix}href=${quote}${rewriteUrl(val, base, workerOrigin)}${quote}`;
+        }
+    );
 
-    html = html.replace(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*>/gi, '');
+    // Rewrite inline style attributes
+    html = html.replace(
+        /(<[^>]+\bstyle=["'])([^"']+)(["'])/gi,
+        (match, open, style, close) => {
+            return open + rewriteCssText(style, base, workerOrigin) + close;
+        }
+    );
+
+    // Rewrite <style> blocks
+    html = html.replace(
+        /(<style[^>]*>)([\s\S]*?)(<\/style>)/gi,
+        (match, open, css, close) => {
+            return open + rewriteCssText(css, base, workerOrigin) + close;
+        }
+    );
+
+    // Rewrite inline <script> blocks (handle import statements and fetch/XHR URLs)
+    html = html.replace(
+        /(<script(?:[^>](?!src=))*>)([\s\S]*?)(<\/script>)/gi,
+        (match, open, js, close) => {
+            if (!js.trim()) return match;
+            return open + rewriteInlineJs(js, base, workerOrigin) + close;
+        }
+    );
+
+    // Rewrite url() in any remaining text nodes (SVG use, etc.)
+    html = html.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, u) => {
+        return `url("${rewriteUrl(u.trim(), base, workerOrigin)}")`;
+    });
 
     const realOrigin = base.origin;
     const realHost   = base.host;
@@ -128,55 +173,40 @@ function __unwrap(u){
     try{return __dec(s.slice(idx+__fp.length));}catch(e){return s;}
 }
 
-try{Object.defineProperty(navigator,'webdriver',{get:function(){return undefined;},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'platform',{get:function(){return 'Win32';},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'vendor',{get:function(){return 'Google Inc.';},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'appName',{get:function(){return 'Netscape';},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'appVersion',{get:function(){return '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'userAgent',{get:function(){return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'languages',{get:function(){return ['en-US','en'];},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'hardwareConcurrency',{get:function(){return 8;},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'deviceMemory',{get:function(){return 8;},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'maxTouchPoints',{get:function(){return 0;},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'cookieEnabled',{get:function(){return true;},configurable:true});}catch(e){}
-try{Object.defineProperty(navigator,'onLine',{get:function(){return true;},configurable:true});}catch(e){}
+// Navigator spoofing
+var __navOverrides={
+    webdriver:undefined,platform:'Win32',vendor:'Google Inc.',appName:'Netscape',
+    appVersion:'5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    languages:['en-US','en'],hardwareConcurrency:8,deviceMemory:8,maxTouchPoints:0,
+    cookieEnabled:true,onLine:true
+};
+for(var __k in __navOverrides){
+    try{Object.defineProperty(navigator,__k,{get:function(__v){return function(){return __v;};}(__navOverrides[__k]),configurable:true});}catch(e){}
+}
+
 try{
     var __plFake=[{filename:'internal/default/internal_delegate_composite.so'},{filename:'internal/default/libpepflashplayer.so'}];
     Object.defineProperty(navigator,'plugins',{get:function(){return __plFake;},configurable:true});
     Object.defineProperty(navigator,'mimeTypes',{get:function(){return [];},configurable:true});
 }catch(e){}
+
 try{
-    if(!window.chrome){
-        Object.defineProperty(window,'chrome',{value:{runtime:{},loadTimes:function(){},csi:function(){},app:{}},writable:false,configurable:true});
-    }
-}catch(e){}
-try{
-    var __permQuery=navigator.permissions&&navigator.permissions.query.bind(navigator.permissions);
-    if(__permQuery){
-        navigator.permissions.query=function(desc){
-            if(desc&&desc.name==='notifications'){return Promise.resolve({state:Notification.permission==='default'?'prompt':Notification.permission});}
-            return __permQuery(desc);
-        };
-    }
-}catch(e){}
-try{Object.defineProperty(window,'outerWidth',{get:function(){return window.innerWidth;},configurable:true});}catch(e){}
-try{Object.defineProperty(window,'outerHeight',{get:function(){return window.innerHeight+80;},configurable:true});}catch(e){}
-try{Object.defineProperty(screen,'width',{get:function(){return 1920;},configurable:true});}catch(e){}
-try{Object.defineProperty(screen,'height',{get:function(){return 1080;},configurable:true});}catch(e){}
-try{Object.defineProperty(screen,'availWidth',{get:function(){return 1920;},configurable:true});}catch(e){}
-try{Object.defineProperty(screen,'availHeight',{get:function(){return 1040;},configurable:true});}catch(e){}
-try{Object.defineProperty(screen,'colorDepth',{get:function(){return 24;},configurable:true});}catch(e){}
-try{Object.defineProperty(screen,'pixelDepth',{get:function(){return 24;},configurable:true});}catch(e){}
-try{if(window.name&&window.name.includes(__fo))window.name='';}catch(e){}
-try{
-    var __origToString=Function.prototype.toString;
-    var __nativeRe=/\{\s*\[native code\]\s*\}/;
-    Function.prototype.toString=function(){
-        var s=__origToString.call(this);
-        return s;
-    };
+    if(!window.chrome){Object.defineProperty(window,'chrome',{value:{runtime:{},loadTimes:function(){},csi:function(){},app:{}},writable:false,configurable:true});}
 }catch(e){}
 
+try{
+    var __permQuery=navigator.permissions&&navigator.permissions.query.bind(navigator.permissions);
+    if(__permQuery){navigator.permissions.query=function(desc){if(desc&&desc.name==='notifications'){return Promise.resolve({state:Notification.permission==='default'?'prompt':Notification.permission});}return __permQuery(desc);};}
+}catch(e){}
+
+try{Object.defineProperty(window,'outerWidth',{get:function(){return window.innerWidth;},configurable:true});}catch(e){}
+try{Object.defineProperty(window,'outerHeight',{get:function(){return window.innerHeight+80;},configurable:true});}catch(e){}
+var __screenProps={width:1920,height:1080,availWidth:1920,availHeight:1040,colorDepth:24,pixelDepth:24};
+for(var __sk in __screenProps){try{Object.defineProperty(screen,__sk,{get:function(__v){return function(){return __v;};}(__screenProps[__sk]),configurable:true});}catch(e){}}
+try{if(window.name&&window.name.includes(__fo))window.name='';}catch(e){}
+
+// XHR proxy
 var _xhrOpen=XMLHttpRequest.prototype.open;
 XMLHttpRequest.prototype.open=function(m,u){
     var args=Array.prototype.slice.call(arguments);
@@ -184,6 +214,7 @@ XMLHttpRequest.prototype.open=function(m,u){
     return _xhrOpen.apply(this,args);
 };
 
+// Fetch proxy
 var _fetch=window.fetch;
 window.fetch=function(input,init){
     if(typeof input==='string'){input=__rw(input);}
@@ -200,6 +231,7 @@ window.fetch=function(input,init){
     return _fetch.call(this,input,init);
 };
 
+// WebSocket proxy
 var _WS=window.WebSocket;
 if(_WS){
     window.WebSocket=function(url,protocols){
@@ -219,28 +251,38 @@ if(_WS){
     window.WebSocket.CLOSED=_WS.CLOSED;
 }
 
+// Worker proxy
 var _Worker=window.Worker;
 if(_Worker){
     window.Worker=function(url,opts){
-        if(typeof url==='string'||url instanceof URL)url=__rw(String(url));
+        if(typeof url==='string'||url instanceof URL){
+            try{url=__fo+__fp+__enc(new URL(String(url),__rhr).href);}catch(e){}
+        }
         return new _Worker(url,opts);
     };
     window.Worker.prototype=_Worker.prototype;
 }
 
+// window.open proxy
 var _open=window.open;
 window.open=function(url){
     var args=Array.prototype.slice.call(arguments);
-    args[0]=__rw(url);
+    if(args[0])args[0]=__rw(args[0]);
     return _open.apply(this,args);
 };
 
+// Service worker: rewrite registration URL through proxy instead of blocking
 try{
     if(navigator.serviceWorker){
-        navigator.serviceWorker.register=function(){return Promise.reject(new Error('SW blocked by proxy'));};
+        var _swReg=navigator.serviceWorker.register.bind(navigator.serviceWorker);
+        navigator.serviceWorker.register=function(url,opts){
+            try{url=__fo+__fp+__enc(new URL(String(url),__rhr).href);}catch(e){}
+            return _swReg(url,opts);
+        };
     }
 }catch(e){}
 
+// location proxy
 var _assign=location.assign.bind(location);
 var _replace=location.replace.bind(location);
 location.assign=function(u){return _assign(__rw(u));};
@@ -255,7 +297,7 @@ Object.defineProperty(window,'location',{
                 if(p==='origin')return __ro;
                 if(p==='host')return __rh;
                 if(p==='hostname')return __rh.split(':')[0];
-                if(p==='protocol')return new URL(__rhr).protocol;
+                if(p==='protocol')try{return new URL(__rhr).protocol;}catch(e){return t.protocol;}
                 if(p==='pathname')try{return new URL(__unwrap(t.href)).pathname;}catch(e){return t.pathname;}
                 if(p==='search')try{return new URL(__unwrap(t.href)).search;}catch(e){return t.search;}
                 if(p==='hash')return t.hash;
@@ -282,6 +324,7 @@ try{
     });
 }catch(e){}
 
+// History proxy
 var _hPush=history.pushState.bind(history);
 var _hReplace=history.replaceState.bind(history);
 history.pushState=function(s,t,u){return _hPush(s,t,u?__rw(u):u);};
@@ -290,42 +333,38 @@ history.replaceState=function(s,t,u){return _hReplace(s,t,u?__rw(u):u);};
 var _pm=window.postMessage.bind(window);
 window.postMessage=function(data,targetOrigin){
     var args=Array.prototype.slice.call(arguments);
-    if(!targetOrigin)args[1]='*';
+    if(!targetOrigin||targetOrigin===__fo)args[1]='*';
     return _pm.apply(this,args);
 };
 
+// createElement proxy
 var _ce=document.createElement.bind(document);
 document.createElement=function(tag){
-    var args=Array.prototype.slice.call(arguments);
-    var el=_ce.apply(document,args);
+    var el=_ce.apply(document,Array.prototype.slice.call(arguments));
     var t=(tag||'').toLowerCase();
-    if(t==='script'){
+    var urlProps={script:'src',a:'href',link:'href',iframe:'src',img:'src',source:'src',audio:'src',video:'src',track:'src'};
+    var prop=urlProps[t];
+    if(prop){
         try{
-            var sd=Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype,'src');
-            if(sd){Object.defineProperty(el,'src',{set:function(v){sd.set.call(el,__rw(v));},get:function(){return __unwrap(sd.get.call(el));},configurable:true});}
+            var proto=el.constructor&&el.constructor.prototype;
+            var desc=proto&&Object.getOwnPropertyDescriptor(proto,prop);
+            if(desc){
+                Object.defineProperty(el,prop,{
+                    set:function(v){desc.set.call(el,__rw(v));},
+                    get:function(){return __unwrap(desc.get.call(el));},
+                    configurable:true
+                });
+            }
         }catch(e){}
     }
-    if(t==='a'){
-        try{
-            var ad=Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype,'href');
-            if(ad){Object.defineProperty(el,'href',{set:function(v){ad.set.call(el,__rw(v));},get:function(){return __unwrap(ad.get.call(el));},configurable:true});}
-        }catch(e){}
-    }
-    if(t==='link'){
-        try{
-            var ld=Object.getOwnPropertyDescriptor(HTMLLinkElement.prototype,'href');
-            if(ld){Object.defineProperty(el,'href',{set:function(v){ld.set.call(el,__rw(v));},get:function(){return __unwrap(ld.get.call(el));},configurable:true});}
-        }catch(e){}
-    }
-    if(t==='iframe'){
-        try{
-            var ifd=Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype,'src');
-            if(ifd){Object.defineProperty(el,'src',{set:function(v){ifd.set.call(el,__rw(v));},get:function(){return __unwrap(ifd.get.call(el));},configurable:true});}
-        }catch(e){}
+    // Strip integrity on created elements
+    if(t==='script'||t==='link'){
+        try{Object.defineProperty(el,'integrity',{set:function(){},get:function(){return '';},configurable:true});}catch(e){}
     }
     return el;
 };
 
+// importScripts (workers)
 if(typeof importScripts!=='undefined'){
     var _is=importScripts;
     importScripts=function(){
@@ -334,26 +373,31 @@ if(typeof importScripts!=='undefined'){
     };
 }
 
-var __origImport=function(u){return import(u);};
-window.__fluxDynamicImport=function(u){try{u=__rw(String(u));}catch(e){}return __origImport(u);};
+// Dynamic import()
+window.__fluxDynamicImport=function(u){
+    try{u=__rw(String(u));}catch(e){}
+    return import(u);
+};
 
-try{
+// MutationObserver - disconnect after document ready to avoid perf drain on SPAs
+// Then re-observe only on demand via a lighter event-based approach
+var __moActive=true;
 var _mo=new MutationObserver(function(mutations){
+    if(!__moActive)return;
     for(var i=0;i<mutations.length;i++){
         var nodes=mutations[i].addedNodes;
         for(var j=0;j<nodes.length;j++){
             var node=nodes[j];
             if(!node||node.nodeType!==1)continue;
             var nt=node.tagName||'';
-            if(nt==='SCRIPT'&&node.src&&!node.src.includes(__fp))node.src=__rw(node.src);
-            if(nt==='LINK'&&node.href&&!node.href.includes(__fp))node.href=__rw(node.href);
-            if(nt==='IFRAME'&&node.src&&!node.src.includes(__fp))node.src=__rw(node.src);
+            if((nt==='SCRIPT'||nt==='IFRAME'||nt==='AUDIO'||nt==='VIDEO'||nt==='TRACK')&&node.src&&!node.src.includes(__fp))node.src=__rw(node.src);
+            if((nt==='LINK'||nt==='A')&&node.href&&!node.href.includes(__fp))node.href=__rw(node.href);
             if(nt==='IMG'){
                 if(node.src&&!node.src.includes(__fp))node.src=__rw(node.src);
                 if(node.srcset&&!node.srcset.includes(__fp)){
                     node.srcset=node.srcset.split(',').map(function(p){
-                        var t=p.trim();var i=t.lastIndexOf(' ');
-                        return i!==-1?__rw(t.substring(0,i).trim())+t.substring(i):__rw(t);
+                        var tr=p.trim();var i=tr.lastIndexOf(' ');
+                        return i!==-1?__rw(tr.substring(0,i).trim())+tr.substring(i):__rw(tr);
                     }).join(', ');
                 }
             }
@@ -365,7 +409,14 @@ var _mo=new MutationObserver(function(mutations){
     }
 });
 _mo.observe(document.documentElement,{childList:true,subtree:true});
-}catch(e){}
+
+// Disconnect observer after page settles; re-enable briefly on navigation events
+if(document.readyState==='complete'){
+    setTimeout(function(){__moActive=false;},2000);
+}else{
+    window.addEventListener('load',function(){setTimeout(function(){__moActive=false;},2000);},{once:true});
+}
+window.addEventListener('popstate',function(){__moActive=true;setTimeout(function(){__moActive=false;},2000);});
 
 })();<\/script>`;
 
@@ -380,7 +431,11 @@ _mo.observe(document.documentElement,{childList:true,subtree:true});
     return html;
 }
 
-function rewriteJs(js, base, workerOrigin) {
+function rewriteInlineJs(js, base, workerOrigin) {
+    return rewriteJs(js, base, workerOrigin, true);
+}
+
+function rewriteJs(js, base, workerOrigin, inline = false) {
     const header = `(function(){
 var __fo=${JSON.stringify(workerOrigin)};
 var __fp=${JSON.stringify(FLUX_PREFIX)};
@@ -390,23 +445,39 @@ function __rw(u){if(!u)return u;var s=String(u);if(s.startsWith('data:')||s.star
 window.__fluxDynamicImport=window.__fluxDynamicImport||function(u){return import(__rw(String(u)));};
 })();\n`;
 
+    // Rewrite dynamic import() calls — skip if inside a comment or string (best effort)
     js = js.replace(/\bimport\s*\(\s*/g, 'window.__fluxDynamicImport(');
 
+    // Rewrite static import/export from declarations
     js = js.replace(
-        /(?:^|[^.\w$])import\s+([\w*{}\s,]+\s+from\s+)?(['"`])([^'"`\s]+)\2/gm,
-        (match, fromPart, quote, url) => {
+        /^(\s*(?:import|export)\s+(?:[\w*{}\s,]+\s+from\s+)?)(["'`])([^"'`\s]+)\2/gm,
+        (match, prefix, quote, url) => {
             const rewritten = rewriteUrl(url, base, workerOrigin);
-            return match.replace(url, rewritten);
+            return `${prefix}${quote}${rewritten}${quote}`;
         }
     );
 
+    if (inline) return js;
     return header + js;
 }
 
 function rewriteCss(css, base, workerOrigin) {
+    return rewriteCssText(css, base, workerOrigin);
+}
+
+function rewriteCssText(css, base, workerOrigin) {
     return css.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, url) => {
         return `url("${rewriteUrl(url.trim(), base, workerOrigin)}")`;
     });
+}
+
+function rewriteCookieHeader(cookieHeader, targetHost) {
+    if (!cookieHeader) return cookieHeader;
+    return cookieHeader
+        .replace(/;\s*domain=[^;]*/gi, '')
+        .replace(/;\s*samesite=[^;]*/gi, '; SameSite=None')
+        .replace(/;\s*secure/gi, '')
+        + '; Secure';
 }
 
 export default {
@@ -437,11 +508,17 @@ async function handleFetch(request, workerUrl) {
         return new Response('Missing target URL', { status: 400, headers: corsHeaders() });
     }
 
+    const targetUrlRaw = decodeUrl(encoded);
+    if (!targetUrlRaw) {
+        return new Response('Invalid encoded URL', { status: 400, headers: corsHeaders() });
+    }
+
     let targetUrl;
     try {
-        targetUrl = decodeUrl(encoded);
-        if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
-            targetUrl = 'https://' + targetUrl;
+        if (!targetUrlRaw.startsWith('http://') && !targetUrlRaw.startsWith('https://')) {
+            targetUrl = 'https://' + targetUrlRaw;
+        } else {
+            targetUrl = targetUrlRaw;
         }
         new URL(targetUrl);
     } catch {
@@ -450,15 +527,10 @@ async function handleFetch(request, workerUrl) {
 
     const parsedTarget = new URL(targetUrl);
 
-    if (workerUrl.search) {
-        const existing = parsedTarget.search;
+    // Forward query string from the proxy request onto the target, without
+    // leaking internal proxy params. Only merge if target has no search already.
+    if (workerUrl.search && !parsedTarget.search) {
         parsedTarget.search = workerUrl.search;
-        if (existing && existing !== workerUrl.search) {
-            const merged = new URLSearchParams(existing.slice(1));
-            const incoming = new URLSearchParams(workerUrl.search.slice(1));
-            for (const [k, v] of incoming) merged.set(k, v);
-            parsedTarget.search = '?' + merged.toString();
-        }
         targetUrl = parsedTarget.href;
     }
 
@@ -480,23 +552,24 @@ async function handleFetch(request, workerUrl) {
     reqHeaders.set('Referer', parsedTarget.origin + '/');
 
     const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-    reqHeaders.set('User-Agent',               ua);
-    reqHeaders.set('Accept',                   'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8');
-    reqHeaders.set('Accept-Language',          'en-US,en;q=0.9');
-    reqHeaders.set('Accept-Encoding',          'gzip, deflate, br');
-    reqHeaders.set('Sec-CH-UA',                '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"');
-    reqHeaders.set('Sec-CH-UA-Mobile',         '?0');
-    reqHeaders.set('Sec-CH-UA-Platform',       '"Windows"');
-    reqHeaders.set('Sec-Fetch-Dest',           'document');
-    reqHeaders.set('Sec-Fetch-Mode',           'navigate');
-    reqHeaders.set('Sec-Fetch-Site',           'none');
-    reqHeaders.set('Sec-Fetch-User',           '?1');
-    reqHeaders.set('Upgrade-Insecure-Requests','1');
-    reqHeaders.set('DNT',                      '1');
+    reqHeaders.set('User-Agent',                ua);
+    reqHeaders.set('Accept',                    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8');
+    reqHeaders.set('Accept-Language',           'en-US,en;q=0.9');
+    reqHeaders.set('Accept-Encoding',           'gzip, deflate, br');
+    reqHeaders.set('Sec-CH-UA',                 '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"');
+    reqHeaders.set('Sec-CH-UA-Mobile',          '?0');
+    reqHeaders.set('Sec-CH-UA-Platform',        '"Windows"');
+    reqHeaders.set('Sec-Fetch-Dest',            'document');
+    reqHeaders.set('Sec-Fetch-Mode',            'navigate');
+    reqHeaders.set('Sec-Fetch-Site',            'none');
+    reqHeaders.set('Sec-Fetch-User',            '?1');
+    reqHeaders.set('Upgrade-Insecure-Requests', '1');
+    reqHeaders.set('DNT',                       '1');
 
     let body = null;
     if (request.method !== 'GET' && request.method !== 'HEAD') {
-        body = await request.arrayBuffer();
+        // Stream the body instead of buffering the whole thing
+        body = request.body;
     }
 
     let targetRes;
@@ -506,6 +579,7 @@ async function handleFetch(request, workerUrl) {
             headers: reqHeaders,
             body,
             redirect: 'manual',
+            duplex: 'half',
         });
     } catch (e) {
         return new Response(`Flux fetch error: ${e.message}`, {
@@ -518,12 +592,19 @@ async function handleFetch(request, workerUrl) {
         const loc = targetRes.headers.get('location');
         if (loc) {
             const workerOrigin = new URL(workerUrl).origin;
-            const abs = new URL(loc, targetUrl).href;
+            const abs    = new URL(loc, targetUrl).href;
             const newLoc = `${workerOrigin}${FLUX_PREFIX}${encodeUrl(abs)}`;
             const rHeaders = new Headers(corsHeaders());
             rHeaders.set('Location', newLoc);
-            const setCookie = targetRes.headers.get('set-cookie');
-            if (setCookie) rHeaders.set('Set-Cookie', setCookie);
+
+            // Forward ALL set-cookie headers on redirects
+            const cookies = targetRes.headers.getAll
+                ? targetRes.headers.getAll('set-cookie')
+                : [targetRes.headers.get('set-cookie')].filter(Boolean);
+            cookies.forEach(c => {
+                rHeaders.append('Set-Cookie', rewriteCookieHeader(c, parsedTarget.host));
+            });
+
             return new Response(null, { status: targetRes.status, headers: rHeaders });
         }
     }
@@ -551,6 +632,14 @@ async function handleFetch(request, workerUrl) {
             resHeaders.set(key, val);
         }
     }
+
+    // Forward ALL set-cookie headers on regular responses
+    const cookies = targetRes.headers.getAll
+        ? targetRes.headers.getAll('set-cookie')
+        : [targetRes.headers.get('set-cookie')].filter(Boolean);
+    cookies.forEach(c => {
+        resHeaders.append('Set-Cookie', rewriteCookieHeader(c, parsedTarget.host));
+    });
 
     for (const [k, v] of Object.entries(corsHeaders())) {
         resHeaders.set(k, v);
@@ -591,10 +680,7 @@ async function handleFetch(request, workerUrl) {
         return new Response(html, { status: targetRes.status, headers: resHeaders });
     }
 
-    if (
-        finalContentType.includes('javascript') ||
-        ext === 'js' || ext === 'mjs' || ext === 'cjs'
-    ) {
+    if (finalContentType.includes('javascript') || ext === 'js' || ext === 'mjs' || ext === 'cjs') {
         let js = await targetRes.text();
         js = rewriteJs(js, base, workerOrigin);
         resHeaders.set('content-type', 'application/javascript; charset=utf-8');
@@ -612,6 +698,7 @@ async function handleFetch(request, workerUrl) {
         return new Response(css, { status: targetRes.status, headers: resHeaders });
     }
 
+    // Everything else streams directly — no buffering
     resHeaders.delete('content-length');
     return new Response(targetRes.body, { status: targetRes.status, headers: resHeaders });
 }
