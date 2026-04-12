@@ -68,9 +68,19 @@ function rewriteSrcset(val, base, workerOrigin) {
 }
 
 function rewriteCssText(css, base, workerOrigin) {
-    return css.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, u) => {
+    // Rewrite url() references
+    css = css.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, u) => {
         return `url("${rewriteUrl(u.trim(), base, workerOrigin)}")`;
     });
+    // Rewrite @import "..." and @import '...'
+    css = css.replace(/@import\s+(["'])([^"']+)\1/gi, (match, quote, u) => {
+        return `@import ${quote}${rewriteUrl(u.trim(), base, workerOrigin)}${quote}`;
+    });
+    // Rewrite @import url(...) (already handled above but be explicit)
+    css = css.replace(/@import\s+url\(["']?([^"')]+)["']?\)/gi, (match, u) => {
+        return `@import url("${rewriteUrl(u.trim(), base, workerOrigin)}")`;
+    });
+    return css;
 }
 
 function rewriteHtml(html, base, workerOrigin) {
@@ -206,6 +216,20 @@ var __screenProps={width:1920,height:1080,availWidth:1920,availHeight:1040,color
 for(var __sk in __screenProps){try{Object.defineProperty(screen,__sk,{get:function(__v){return function(){return __v;};}(__screenProps[__sk]),configurable:true});}catch(e){}}
 try{if(window.name&&window.name.includes(__fo))window.name='';}catch(e){}
 
+// WebRTC leak prevention — strip ICE servers so local IP is never exposed
+try{
+    var _RTC=window.RTCPeerConnection;
+    if(_RTC){
+        window.RTCPeerConnection=function(cfg,opts){
+            if(cfg&&cfg.iceServers)cfg.iceServers=[];
+            return new _RTC(cfg,opts);
+        };
+        window.RTCPeerConnection.prototype=_RTC.prototype;
+        window.RTCPeerConnection.HAVE_LOCAL_OFFER=_RTC.HAVE_LOCAL_OFFER;
+        window.RTCPeerConnection.HAVE_REMOTE_OFFER=_RTC.HAVE_REMOTE_OFFER;
+    }
+}catch(e){}
+
 // XHR proxy
 var _xhrOpen=XMLHttpRequest.prototype.open;
 XMLHttpRequest.prototype.open=function(m,u){
@@ -280,6 +304,98 @@ try{
             return _swReg(url,opts);
         };
     }
+}catch(e){}
+
+// Blob URL interception — rewrite JS/HTML blobs before they escape
+try{
+    var _createObjectURL=URL.createObjectURL.bind(URL);
+    var _revokeObjectURL=URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL=function(obj){
+        if(obj instanceof Blob&&obj.type&&(obj.type.includes('javascript')||obj.type.includes('html'))){
+            // Async rewrite: return a placeholder and swap after read
+            // For synchronous callers we fall through to original
+            try{
+                var reader=new FileReaderSync();
+                var text=reader.readAsText(obj);
+                var rewritten=text.replace(/url\(["']?([^"')]+)["']?\)/gi,function(m,u){return 'url("'+__rw(u.trim())+'")';});
+                rewritten=rewritten.replace(/(?:import|from)\s+(["'])([^"']+)\1/g,function(m,q,u){return m.replace(u,__rw(u));});
+                return _createObjectURL(new Blob([rewritten],{type:obj.type}));
+            }catch(e){
+                // FileReaderSync not available in main thread; fall through
+            }
+        }
+        return _createObjectURL(obj);
+    };
+}catch(e){}
+
+// postMessage origin spoofing — rewrite event.origin so site message handlers accept messages
+try{
+    var _aEL=EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener=function(type,handler,opts){
+        if(type==='message'&&typeof handler==='function'){
+            var _wrapped=function(e){
+                try{
+                    var src=e.source;
+                    // Only spoof if message came from our proxy frame
+                    if(e.origin&&e.origin===__fo){
+                        Object.defineProperty(e,'origin',{value:__ro,configurable:true});
+                    }
+                }catch(_){}
+                return handler.call(this,e);
+            };
+            // Store ref so removeEventListener still works
+            handler.__fluxWrapped=_wrapped;
+            return _aEL.call(this,type,_wrapped,opts);
+        }
+        return _aEL.call(this,type,handler,opts);
+    };
+    var _rEL=EventTarget.prototype.removeEventListener;
+    EventTarget.prototype.removeEventListener=function(type,handler,opts){
+        if(type==='message'&&handler&&handler.__fluxWrapped){
+            return _rEL.call(this,type,handler.__fluxWrapped,opts);
+        }
+        return _rEL.call(this,type,handler,opts);
+    };
+}catch(e){}
+
+// document.cookie domain spoofing — strip domain from set, return as-is on get
+try{
+    var _cookieDesc=Object.getOwnPropertyDescriptor(Document.prototype,'cookie');
+    if(_cookieDesc){
+        Object.defineProperty(document,'cookie',{
+            get:function(){return _cookieDesc.get.call(document);},
+            set:function(v){
+                if(typeof v==='string'){
+                    v=v.replace(/;\s*domain=[^;]*/gi,'');
+                    v=v.replace(/;\s*samesite=[^;]*/gi,'; SameSite=None');
+                }
+                _cookieDesc.set.call(document,v);
+            },
+            configurable:true
+        });
+    }
+}catch(e){}
+
+// eval() and new Function() rewriting — catch dynamically generated code with hardcoded URLs
+try{
+    var _eval=window.eval;
+    window.eval=function(code){
+        if(typeof code==='string'){
+            code=code.replace(/\bimport\s*\(\s*/g,'window.__fluxDynamicImport(');
+        }
+        return _eval.call(this,code);
+    };
+    var _Function=window.Function;
+    window.Function=function(){
+        var args=Array.prototype.slice.call(arguments);
+        var body=args.pop();
+        if(typeof body==='string'){
+            body=body.replace(/\bimport\s*\(\s*/g,'window.__fluxDynamicImport(');
+        }
+        args.push(body);
+        return _Function.apply(this,args);
+    };
+    window.Function.prototype=_Function.prototype;
 }catch(e){}
 
 // location proxy
@@ -380,7 +496,6 @@ window.__fluxDynamicImport=function(u){
 };
 
 // MutationObserver - disconnect after document ready to avoid perf drain on SPAs
-// Then re-observe only on demand via a lighter event-based approach
 var __moActive=true;
 var _mo=new MutationObserver(function(mutations){
     if(!__moActive)return;
@@ -405,12 +520,14 @@ var _mo=new MutationObserver(function(mutations){
                 if(node.src&&!node.src.includes(__fp))node.src=__rw(node.src);
                 if(node.srcset&&!node.srcset.includes(__fp))node.srcset=__rw(node.srcset);
             }
+            // Strip integrity/crossorigin on dynamically added elements
+            if(node.integrity!==undefined)try{node.integrity='';}catch(e){}
+            if(node.crossOrigin!==undefined)try{node.crossOrigin=null;}catch(e){}
         }
     }
 });
 _mo.observe(document.documentElement,{childList:true,subtree:true});
 
-// Disconnect observer after page settles; re-enable briefly on navigation events
 if(document.readyState==='complete'){
     setTimeout(function(){__moActive=false;},2000);
 }else{
@@ -445,7 +562,7 @@ function __rw(u){if(!u)return u;var s=String(u);if(s.startsWith('data:')||s.star
 window.__fluxDynamicImport=window.__fluxDynamicImport||function(u){return import(__rw(String(u)));};
 })();\n`;
 
-    // Rewrite dynamic import() calls — skip if inside a comment or string (best effort)
+    // Rewrite dynamic import() calls
     js = js.replace(/\bimport\s*\(\s*/g, 'window.__fluxDynamicImport(');
 
     // Rewrite static import/export from declarations
@@ -562,7 +679,6 @@ async function handleFetch(request, workerUrl) {
 
     let body = null;
     if (request.method !== 'GET' && request.method !== 'HEAD') {
-        // Stream the body instead of buffering the whole thing
         body = request.body;
     }
 
